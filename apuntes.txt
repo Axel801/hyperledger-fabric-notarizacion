@@ -1,0 +1,255 @@
+
+cd ~/curso
+
+
+docker stop $(docker ps -a -q)
+
+docker rm $(docker ps -a -q)
+
+docker volume prune
+
+docker network prune
+
+
+
+sudo rm -rf organizations/fabric-ca/empresa/
+
+sudo rm -rf organizations/fabric-ca/empresa/
+
+sudo rm -rf organizations/fabric-ca/ordererOrg/
+
+sudo rm -rf organizations/peerOrganizations
+
+sudo rm -rf organizations/ordererOrganizations
+
+sudo rm -rf channel-artifacts/
+
+mkdir channel-artifacts
+
+
+
+docker-compose -f compose/compose-registro-hash-ca.yaml  up -d
+
+
+
+export PATH=${PWD}/../fabric-samples/bin:${PWD}:$PATH
+
+export FABRIC_CFG_PATH=${PWD}/configtx
+
+
+
+. ./organizations/fabric-ca/registerEnrollCertificacion.sh && createEmpresa
+
+. ./organizations/fabric-ca/registerEnrollCertificacion.sh && createOrderer
+
+
+
+cp configtx/configtxHash.yaml configtx/configtx.yaml  
+
+configtxgen -profile CertifApplicationGenesis -outputBlock ./channel-artifacts/hashchannel.block -channelID hashchannel
+
+export FABRIC_CFG_PATH=${PWD}/../fabric-samples/config
+
+export ORDERER_CA=${PWD}/organizations/ordererOrganizations/certificacion.com/orderers/orderer.certificacion.com/msp/tlscacerts/tlsca.certificacion.com-cert.pem
+
+export ORDERER_ADMIN_TLS_SIGN_CERT=${PWD}/organizations/ordererOrganizations/certificacion.com/orderers/orderer.certificacion.com/tls/server.crt
+
+export ORDERER_ADMIN_TLS_PRIVATE_KEY=${PWD}/organizations/ordererOrganizations/certificacion.com/orderers/orderer.certificacion.com/tls/server.key
+
+
+
+docker-compose -f compose/compose-registro-hash.yaml  up -d
+
+
+osnadmin channel join --channelID hashchannel --config-block ./channel-artifacts/hashchannel.block -o localhost:7053 --ca-file "$ORDERER_CA" --client-cert "$ORDERER_ADMIN_TLS_SIGN_CERT" --client-key "$ORDERER_ADMIN_TLS_PRIVATE_KEY"
+
+osnadmin channel list -o localhost:7053 --ca-file "$ORDERER_CA" --client-cert "$ORDERER_ADMIN_TLS_SIGN_CERT" --client-key "$ORDERER_ADMIN_TLS_PRIVATE_KEY"
+
+
+
+export CORE_PEER_TLS_ENABLED=true
+
+export PEER0_EMPRESA_CA=${PWD}/organizations/peerOrganizations/empresa.certificacion.com/peers/peer0.empresa.certificacion.com/tls/ca.crt
+
+export CORE_PEER_LOCALMSPID="EmpresaMSP"
+
+export CORE_PEER_TLS_ROOTCERT_FILE=$PEER0_EMPRESA_CA
+
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/empresa.certificacion.com/users/Admin@empresa.certificacion.com/msp
+
+export CORE_PEER_ADDRESS=localhost:7051
+
+peer channel join -b ./channel-artifacts/hashchannel.block
+
+
+
+export PEER1_EMPRESA_CA=${PWD}/organizations/peerOrganizations/empresa.certificacion.com/peers/peer1.empresa.certificacion.com/tls/ca.crt
+
+export CORE_PEER_TLS_ROOTCERT_FILE=$PEER1_EMPRESA_CA
+
+export CORE_PEER_ADDRESS=localhost:9051
+
+peer channel join -b ./channel-artifacts/hashchannel.block
+
+
+
+//FIJAR UN ANCHOR PEER
+
+export PEER0_EMPRESA_CA=${PWD}/organizations/peerOrganizations/empresa.certificacion.com/peers/peer0.empresa.certificacion.com/tls/ca.crt
+
+export CORE_PEER_LOCALMSPID="EmpresaMSP"
+
+export CORE_PEER_TLS_ROOTCERT_FILE=$PEER0_EMPRESA_CA
+
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/empresa.certificacion.com/users/Admin@empresa.certificacion.com/msp
+
+export CORE_PEER_ADDRESS=localhost:7051
+
+
+
+peer channel fetch config channel-artifacts/config_block.pb -o localhost:7050 --ordererTLSHostnameOverride orderer.certificacion.com -c hashchannel --tls --cafile "$ORDERER_CA"
+
+
+
+cd channel-artifacts
+
+
+
+configtxlator proto_decode --input config_block.pb --type common.Block --output config_block.json
+
+
+
+jq '.data.data[0].payload.data.config' config_block.json > config.json
+
+cp config.json config_copy.json
+
+jq '.channel_group.groups.Application.groups.EmpresaMSP.values += {"AnchorPeers":{"mod_policy": "Admins","value":{"anchor_peers": [{"host": "peer0.empresa.certificacion.com","port": 7051}]},"version": "0"}}' config_copy.json > modified_config.json
+
+
+
+configtxlator proto_encode --input config.json --type common.Config --output config.pb
+
+configtxlator proto_encode --input modified_config.json --type common.Config --output modified_config.pb
+
+
+
+configtxlator compute_update --channel_id hashchannel --original config.pb --updated modified_config.pb --output config_update.pb
+
+
+
+configtxlator proto_decode --input config_update.pb --type common.ConfigUpdate --output config_update.json
+
+echo '{"payload":{"header":{"channel_header":{"channel_id":"hashchannel", "type":2}},"data":{"config_update":'$(cat config_update.json)'}}}' | jq . > config_update_in_envelope.json
+
+
+
+configtxlator proto_encode --input config_update_in_envelope.json --type common.Envelope --output config_update_in_envelope.pb
+
+
+
+cd ..
+
+
+
+peer channel update -f channel-artifacts/config_update_in_envelope.pb -c hashchannel -o localhost:7050  --ordererTLSHostnameOverride orderer.certificacion.com --tls --cafile "${PWD}/organizations/ordererOrganizations/certificacion.com/orderers/orderer.certificacion.com/msp/tlscacerts/tlsca.certificacion.com-cert.pem"
+
+
+
+
+
+//DESARROLLAR EL CHAINCODE
+
+
+
+cd ~/curso/chaincodes/hash/go/
+
+go mod init test.go 
+
+go mod vendor
+
+
+
+cd ~/curso
+
+export PATH=${PWD}/../fabric-samples/bin:${PWD}:$PATH
+
+export FABRIC_CFG_PATH=${PWD}/../fabric-samples/config
+
+
+
+peer version
+
+peer lifecycle chaincode package hash.tar.gz --path chaincodes/hash/go --lang golang --label hash_1.0
+
+
+
+export CORE_PEER_TLS_ENABLED=true
+
+export CORE_PEER_LOCALMSPID="EmpresaMSP"
+
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/empresa.certificacion.com/peers/peer0.empresa.certificacion.com/tls/ca.crt
+
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/empresa.certificacion.com/users/Admin@empresa.certificacion.com/msp
+
+export CORE_PEER_ADDRESS=localhost:7051
+
+peer lifecycle chaincode install hash.tar.gz
+
+
+
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/empresa.certificacion.com/peers/peer1.empresa.certificacion.com/tls/ca.crt
+
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/empresa.certificacion.com/users/Admin@empresa.certificacion.com/msp
+
+export CORE_PEER_ADDRESS=localhost:9051
+
+peer lifecycle chaincode install hash.tar.gz
+
+
+
+peer lifecycle chaincode queryinstalled
+
+//copiar el ID del package, es una combinación del nombre del chaincode y el hash del contenido del código
+
+export CC_PACKAGE_ID=hash_1.0:cfa3224a71dc6a668179e4e48bff7321bbe59508f1f226b6ea8d750be967db49
+
+peer lifecycle chaincode approveformyorg -o localhost:7050 --ordererTLSHostnameOverride orderer.certificacion.com --channelID hashchannel --name hash --version 1.0 --package-id $CC_PACKAGE_ID --sequence 1 --tls --cafile ${PWD}/organizations/ordererOrganizations/certificacion.com/orderers/orderer.certificacion.com/msp/tlscacerts/tlsca.certificacion.com-cert.pem
+
+
+
+export CORE_PEER_LOCALMSPID="EmpresaMSP"
+
+export CORE_PEER_MSPCONFIGPATH=${PWD}/organizations/peerOrganizations/empresa.certificacion.com/users/Admin@empresa.certificacion.com/msp
+
+export CORE_PEER_TLS_ROOTCERT_FILE=${PWD}/organizations/peerOrganizations/empresa.certificacion.com/peers/peer0.empresa.certificacion.com/tls/ca.crt
+
+export CORE_PEER_ADDRESS=localhost:7051
+
+peer lifecycle chaincode approveformyorg -o localhost:7050 --ordererTLSHostnameOverride orderer.certificacion.com --channelID hashchannel  --name hash --version 1.0 --package-id $CC_PACKAGE_ID --sequence 1 --tls --cafile ${PWD}/organizations/ordererOrganizations/certificacion.com/orderers/orderer.certificacion.com/msp/tlscacerts/tlsca.certificacion.com-cert.pem
+
+
+
+peer lifecycle chaincode checkcommitreadiness --channelID hashchannel --name hash --version 1.0 --sequence 1 --tls --cafile ${PWD}/organizations/ordererOrganizations/certificacion.com/orderers/orderer.certificacion.com/msp/tlscacerts/tlsca.certificacion.com-cert.pem --output json
+
+
+
+peer lifecycle chaincode commit -o localhost:7050 --ordererTLSHostnameOverride orderer.certificacion.com --channelID hashchannel --name hash --version 1.0 --sequence 1 --tls --cafile ${PWD}/organizations/ordererOrganizations/certificacion.com/orderers/orderer.certificacion.com/msp/tlscacerts/tlsca.certificacion.com-cert.pem --peerAddresses localhost:7051 --tlsRootCertFiles ${PWD}/organizations/peerOrganizations/empresa.certificacion.com/peers/peer0.empresa.certificacion.com/tls/ca.crt --peerAddresses localhost:9051 --tlsRootCertFiles ${PWD}/organizations/peerOrganizations/empresa.certificacion.com/peers/peer1.empresa.certificacion.com/tls/ca.crt
+
+
+
+peer lifecycle chaincode querycommitted --channelID hashchannel --name hash --cafile ${PWD}/organizations/ordererOrganizations/certificacion.com/orderers/orderer.certificacion.com/msp/tlscacerts/tlsca.certificacion.com-cert.pem
+
+
+
+//probar el chaincode
+
+peer chaincode invoke -o localhost:7050 --ordererTLSHostnameOverride orderer.certificacion.com --tls --cafile ${PWD}/organizations/ordererOrganizations/certificacion.com/orderers/orderer.certificacion.com/msp/tlscacerts/tlsca.certificacion.com-cert.pem -C hashchannel -n hash --peerAddresses localhost:7051 --tlsRootCertFiles ${PWD}/organizations/peerOrganizations/empresa.certificacion.com/peers/peer0.empresa.certificacion.com/tls/ca.crt -c '{"function":"initLedger","Args":[""]}'
+
+
+
+peer chaincode invoke -o localhost:7050 --ordererTLSHostnameOverride orderer.certificacion.com --tls --cafile ${PWD}/organizations/ordererOrganizations/certificacion.com/orderers/orderer.certificacion.com/msp/tlscacerts/tlsca.certificacion.com-cert.pem -C hashchannel -n hash --peerAddresses localhost:9051 --tlsRootCertFiles ${PWD}/organizations/peerOrganizations/empresa.certificacion.com/peers/peer0.empresa.certificacion.com/tls/ca.crt -c '{"function":"CreateHash","Args":["hola mundoo","test 2"]}'
+
+peer chaincode query -C hashchannel -n hash -c '{"Args":["ReadHash","b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"]}'
+
+peer chaincode query -C hashchannel -n hash -c '{"Args":["ReadHash","22759dbf5f1465e25f92639540ecbcf4794d02b4"]}'
+
