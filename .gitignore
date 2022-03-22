@@ -1,2 +1,6 @@
 organizations/ordererOrganizations/
 organizations/peerOrganizations/
+chaincodes/hash/go/vendor/
+organizations/fabric-ca/empresa/
+organizations/fabric-ca/ordererOrg/
+channel-artifacts/
